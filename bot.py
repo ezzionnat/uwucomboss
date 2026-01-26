@@ -199,10 +199,10 @@ def can_use_command(level: str, command: str) -> bool:
         return True
 
     if level == "manager":
-        return command not in {"whitelist", "unwhitelist"}
+        return command not in {"whitelist", "unwhitelist", "wipe"}
 
     if level == "staff":
-        return command not in {"setcredits", "whitelist", "unwhitelist"}
+        return command not in {"setcredits", "whitelist", "unwhitelist", "wipe"}
 
     return False
 
@@ -383,6 +383,19 @@ async def setcredits_cmd(interaction: discord.Interaction, user: discord.User, a
         f"set <@{int(target.id)}> credits to {format_credits(new_val)}.",
         ephemeral=True,
     )
+
+@bot.tree.command(name="wipe", description="wipe all credits")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def wipe_cmd(interaction: discord.Interaction):
+    if not await require_access(interaction, "wipe"):
+        return
+
+    assert bot.pool is not None
+    async with bot.pool.acquire() as con:
+        await con.execute("delete from credits;")
+
+    await interaction.response.send_message("wiped all credits.", ephemeral=True)
 
 
 @bot.tree.command(name="whitelist", description="give a stored whitelist role to a user")
