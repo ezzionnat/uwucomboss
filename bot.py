@@ -13,7 +13,6 @@ guild_id_raw = os.getenv("guild_id", "")
 owner_ids_raw = os.getenv("owner_ids", "")
 
 embed_color = discord.Color.green()
-
 valid_roles = {"owners", "manager", "staff"}
 
 
@@ -212,7 +211,10 @@ async def require_access(interaction: discord.Interaction, command: str) -> bool
     uid = int(interaction.user.id)
     level = await get_access_level(uid)
     if not can_use_command(level, command):
-        await interaction.response.send_message("you do not have permission to use this command.", ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send("you do not have permission to use this command.", ephemeral=True)
+        else:
+            await interaction.response.send_message("you do not have permission to use this command.", ephemeral=True)
         return False
     return True
 
@@ -226,6 +228,8 @@ def role_choices() -> list[app_commands.Choice[str]]:
 
 
 @bot.tree.command(name="credits", description="check credits for a user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to check (defaults to you)")
 async def credits_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
     if not await require_access(interaction, "credits"):
@@ -239,6 +243,8 @@ async def credits_cmd(interaction: discord.Interaction, user: Optional[discord.U
 
 
 @bot.tree.command(name="creditsleaderboard", description="show credits leaderboard")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def creditsleaderboard_cmd(interaction: discord.Interaction):
     if not await require_access(interaction, "creditsleaderboard"):
         return
@@ -260,6 +266,8 @@ async def creditsleaderboard_cmd(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="addcredits", description="add credits to a user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to add credits to (defaults to you)", amount="amount to add")
 async def addcredits_cmd(interaction: discord.Interaction, amount: int, user: Optional[discord.User] = None):
     if not await require_access(interaction, "addcredits"):
@@ -278,6 +286,8 @@ async def addcredits_cmd(interaction: discord.Interaction, amount: int, user: Op
 
 
 @bot.tree.command(name="subcredits", description="subtract credits from a user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to subtract credits from (defaults to you)", amount="amount to subtract")
 async def subcredits_cmd(interaction: discord.Interaction, amount: int, user: Optional[discord.User] = None):
     if not await require_access(interaction, "subcredits"):
@@ -296,6 +306,8 @@ async def subcredits_cmd(interaction: discord.Interaction, amount: int, user: Op
 
 
 @bot.tree.command(name="setcredits", description="set a user credits to an exact amount")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to set credits for", amount="new credits amount")
 async def setcredits_cmd(interaction: discord.Interaction, user: discord.User, amount: int):
     if not await require_access(interaction, "setcredits"):
@@ -313,6 +325,8 @@ async def setcredits_cmd(interaction: discord.Interaction, user: discord.User, a
 
 
 @bot.tree.command(name="whitelist", description="give a stored whitelist role to a user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to whitelist", role="which role to add")
 @app_commands.choices(role=role_choices())
 async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, role: app_commands.Choice[str]):
@@ -343,6 +357,8 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, ro
 
 
 @bot.tree.command(name="unwhitelist", description="remove all stored whitelist roles from a user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to unwhitelist")
 async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
     if not await require_access(interaction, "unwhitelist"):
@@ -352,7 +368,6 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
     async with bot.pool.acquire() as con:
         res = await con.execute("delete from whitelist_roles where user_id = $1;", int(user.id))
 
-    # res looks like: "delete 3"
     await interaction.response.send_message(
         f"removed stored roles from <@{int(user.id)}>* ({res.lower()}).",
         ephemeral=True,
