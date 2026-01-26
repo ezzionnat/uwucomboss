@@ -93,6 +93,54 @@ class credit_bot(commands.Bot):
 
 bot = credit_bot()
 
+async def resolve_target_user(interaction: discord.Interaction, option_name: str) -> Optional[discord.User]:
+    data = getattr(interaction, "data", None) or {}
+
+    # best case: discord includes resolved objects
+    resolved = data.get("resolved") or {}
+    users = resolved.get("users") or {}
+    members = resolved.get("members") or {}
+
+    options = data.get("options") or []
+    for opt in options:
+        if opt.get("name") != option_name:
+            continue
+
+        raw = opt.get("value")
+        if raw is None:
+            return None
+
+        try:
+            uid = int(raw)
+        except Exception:
+            # sometimes it comes as "<@id>" or "<@!id>"
+            s = str(raw).replace("<@!", "").replace("<@", "").replace(">", "").strip()
+            if not s.isdigit():
+                return None
+            uid = int(s)
+
+        # try resolved user first
+        u = users.get(str(uid))
+        if u is not None:
+            try:
+                return discord.User(state=interaction.client._connection, data=u)  # type: ignore
+            except Exception:
+                pass
+
+        # if member resolved exists, still fetch as user
+        if str(uid) in members:
+            try:
+                return await interaction.client.fetch_user(uid)
+            except Exception:
+                return None
+
+        # final fallback: fetch from api
+        try:
+            return await interaction.client.fetch_user(uid)
+        except Exception:
+            return None
+
+    return None
 
 async def get_credits(user_id: int) -> int:
     assert bot.pool is not None
@@ -235,9 +283,13 @@ async def credits_cmd(interaction: discord.Interaction, user: Optional[discord.U
     if not await require_access(interaction, "credits"):
         return
 
-    target = user or interaction.user
-    amount = await get_credits(int(target.id))
+    target = user
+    if target is None:
+        target = await resolve_target_user(interaction, "user")
+    if target is None:
+        target = interaction.user
 
+    amount = await get_credits(int(target.id))
     e = make_embed("timedeal credits", [f"**{format_credits(amount)} credits**"])
     await interaction.response.send_message(embed=e)
 
