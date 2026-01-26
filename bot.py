@@ -1,5 +1,4 @@
 import os
-import asyncio
 from typing import Optional
 
 import asyncpg
@@ -8,15 +7,30 @@ from discord import app_commands
 from discord.ext import commands
 
 
-token = os.getenv("DISCORD_TOKEN", "")
-database_url = os.getenv("DATABASE_URL", "")
-guild_id_raw = os.getenv("GUILD_ID", "")
-
-owners_role_name = "owners"
-manager_role_name = "manager"
-staff_role_name = "staff"
+token = os.getenv("discord_token", "")
+database_url = os.getenv("database_url", "")
+guild_id_raw = os.getenv("guild_id", "")
+owner_ids_raw = os.getenv("owner_ids", "")
 
 embed_color = discord.Color.green()
+
+valid_roles = {"owners", "manager", "staff"}
+
+
+def parse_owner_ids(raw: str) -> set[int]:
+    out: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except Exception:
+            pass
+    return out
+
+
+owner_ids = parse_owner_ids(owner_ids_raw)
 
 
 def is_int(s: str) -> bool:
@@ -31,44 +45,8 @@ def format_credits(n: int) -> str:
     return f"{n:,}"
 
 
-def credits_embed(title: str, lines: list[str]) -> discord.Embed:
-    e = discord.Embed(title=title, description="\n".join(lines), color=embed_color)
-    return e
-
-
-def has_role(member: discord.Member, role_name: str) -> bool:
-    return any(r.name == role_name for r in member.roles)
-
-
-def get_access_level(member: discord.Member) -> str:
-    if has_role(member, owners_role_name):
-        return "owners"
-    if has_role(member, manager_role_name):
-        return "manager"
-    if has_role(member, staff_role_name):
-        return "staff"
-    return "none"
-
-
-def can_use_command(member: discord.Member, command: str) -> bool:
-    level = get_access_level(member)
-
-    # everyone can view
-    if command in {"credits", "creditsleaderboard"}:
-        return True
-
-    if level == "owners":
-        return True
-
-    if level == "manager":
-        # manager cannot whitelist or unwhitelist
-        return command not in {"whitelist", "unwhitelist"}
-
-    if level == "staff":
-        # staff cannot setcredits, whitelist, unwhitelist
-        return command not in {"setcredits", "whitelist", "unwhitelist"}
-
-    return False
+def make_embed(title: str, lines: list[str]) -> discord.Embed:
+    return discord.Embed(title=title, description="\n".join(lines), color=embed_color)
 
 
 class credit_bot(commands.Bot):
@@ -78,10 +56,8 @@ class credit_bot(commands.Bot):
         self.pool: Optional[asyncpg.Pool] = None
 
     async def setup_hook(self):
-        # connect db
         self.pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
 
-        # migrate
         async with self.pool.acquire() as con:
             await con.execute(
                 """
@@ -93,15 +69,14 @@ class credit_bot(commands.Bot):
             )
             await con.execute(
                 """
-                create table if not exists whitelists (
+                create table if not exists whitelist_roles (
                     user_id bigint not null,
-                    role_id bigint not null,
-                    primary key (user_id, role_id)
+                    role text not null,
+                    primary key (user_id, role)
                 );
                 """
             )
 
-        # sync commands
         if guild_id_raw and is_int(guild_id_raw):
             guild = discord.Object(id=int(guild_id_raw))
             self.tree.copy_global_to(guild=guild)
@@ -124,24 +99,23 @@ async def get_credits(user_id: int) -> int:
     assert bot.pool is not None
     async with bot.pool.acquire() as con:
         row = await con.fetchrow("select credits from credits where user_id = $1;", user_id)
-        if not row:
-            return 0
-        return int(row["credits"])
+        return int(row["credits"]) if row else 0
 
 
 async def set_credits(user_id: int, amount: int) -> int:
     assert bot.pool is not None
     async with bot.pool.acquire() as con:
-        await con.execute(
+        row = await con.fetchrow(
             """
             insert into credits (user_id, credits)
             values ($1, $2)
-            on conflict (user_id) do update set credits = excluded.credits;
+            on conflict (user_id) do update set credits = excluded.credits
+            returning credits;
             """,
             user_id,
             amount,
         )
-    return amount
+    return int(row["credits"])
 
 
 async def add_credits(user_id: int, delta: int) -> int:
@@ -161,16 +135,20 @@ async def add_credits(user_id: int, delta: int) -> int:
 
 
 async def sub_credits(user_id: int, delta: int) -> int:
-    # subtract but never go below 0
     assert bot.pool is not None
     async with bot.pool.acquire() as con:
-        row = await con.fetchrow("select credits from credits where user_id = $1;", user_id)
-        cur = int(row["credits"]) if row else 0
-        new_val = cur - delta
-        if new_val < 0:
-            new_val = 0
-        await set_credits(user_id, new_val)
-    return new_val
+        row = await con.fetchrow(
+            """
+            insert into credits (user_id, credits)
+            values ($1, 0)
+            on conflict (user_id) do update
+            set credits = greatest(credits.credits - $2, 0)
+            returning credits;
+            """,
+            user_id,
+            delta,
+        )
+    return int(row["credits"])
 
 
 async def leaderboard_rows() -> list[asyncpg.Record]:
@@ -187,7 +165,59 @@ async def leaderboard_rows() -> list[asyncpg.Record]:
     return rows
 
 
-def role_choice_autocomplete() -> list[app_commands.Choice[str]]:
+async def get_user_roles(user_id: int) -> set[str]:
+    assert bot.pool is not None
+    async with bot.pool.acquire() as con:
+        rows = await con.fetch(
+            "select role from whitelist_roles where user_id = $1;",
+            user_id,
+        )
+    return {str(r["role"]) for r in rows}
+
+
+def resolve_level_from_roles(roles: set[str]) -> str:
+    if "owners" in roles:
+        return "owners"
+    if "manager" in roles:
+        return "manager"
+    if "staff" in roles:
+        return "staff"
+    return "none"
+
+
+async def get_access_level(user_id: int) -> str:
+    if user_id in owner_ids:
+        return "owners"
+    roles = await get_user_roles(user_id)
+    return resolve_level_from_roles(roles)
+
+
+def can_use_command(level: str, command: str) -> bool:
+    if command in {"credits", "creditsleaderboard"}:
+        return True
+
+    if level == "owners":
+        return True
+
+    if level == "manager":
+        return command not in {"whitelist", "unwhitelist"}
+
+    if level == "staff":
+        return command not in {"setcredits", "whitelist", "unwhitelist"}
+
+    return False
+
+
+async def require_access(interaction: discord.Interaction, command: str) -> bool:
+    uid = int(interaction.user.id)
+    level = await get_access_level(uid)
+    if not can_use_command(level, command):
+        await interaction.response.send_message("you do not have permission to use this command.", ephemeral=True)
+        return False
+    return True
+
+
+def role_choices() -> list[app_commands.Choice[str]]:
     return [
         app_commands.Choice(name="owners", value="owners"),
         app_commands.Choice(name="manager", value="manager"),
@@ -195,43 +225,27 @@ def role_choice_autocomplete() -> list[app_commands.Choice[str]]:
     ]
 
 
-async def require_access(interaction: discord.Interaction, command: str) -> bool:
-    if not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message("this command can only be used in a server.", ephemeral=True)
-        return False
-
-    member: discord.Member = interaction.user
-    if not can_use_command(member, command):
-        await interaction.response.send_message("you do not have permission to use this command.", ephemeral=True)
-        return False
-
-    return True
-
-
 @bot.tree.command(name="credits", description="check credits for a user")
 @app_commands.describe(user="the user to check (defaults to you)")
-async def credits_cmd(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+async def credits_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
     if not await require_access(interaction, "credits"):
         return
 
     target = user or interaction.user
     amount = await get_credits(int(target.id))
 
-    e = credits_embed(
-        "timedeal credits",
-        [f"**{format_credits(amount)} credits**"],
-    )
+    e = make_embed("timedeal credits", [f"**{format_credits(amount)} credits**"])
     await interaction.response.send_message(embed=e)
 
 
 @bot.tree.command(name="creditsleaderboard", description="show credits leaderboard")
-async def leaderboard_cmd(interaction: discord.Interaction):
+async def creditsleaderboard_cmd(interaction: discord.Interaction):
     if not await require_access(interaction, "creditsleaderboard"):
         return
 
     rows = await leaderboard_rows()
     if not rows:
-        e = credits_embed("credits leaderboard", ["no one has credits yet."])
+        e = make_embed("credits leaderboard", ["no one has credits yet."])
         await interaction.response.send_message(embed=e)
         return
 
@@ -239,15 +253,15 @@ async def leaderboard_cmd(interaction: discord.Interaction):
     for i, r in enumerate(rows, start=1):
         uid = int(r["user_id"])
         amt = int(r["credits"])
-        lines.append(f"{i}. <@{uid}> \u2014 {format_credits(amt)} credits")
+        lines.append(f"{i}. <@{uid}> - {format_credits(amt)} credits")
 
-    e = credits_embed("credits leaderboard", lines)
+    e = make_embed("credits leaderboard", lines)
     await interaction.response.send_message(embed=e)
 
 
 @bot.tree.command(name="addcredits", description="add credits to a user")
 @app_commands.describe(user="the user to add credits to (defaults to you)", amount="amount to add")
-async def addcredits_cmd(interaction: discord.Interaction, amount: int, user: Optional[discord.Member] = None):
+async def addcredits_cmd(interaction: discord.Interaction, amount: int, user: Optional[discord.User] = None):
     if not await require_access(interaction, "addcredits"):
         return
 
@@ -265,7 +279,7 @@ async def addcredits_cmd(interaction: discord.Interaction, amount: int, user: Op
 
 @bot.tree.command(name="subcredits", description="subtract credits from a user")
 @app_commands.describe(user="the user to subtract credits from (defaults to you)", amount="amount to subtract")
-async def subcredits_cmd(interaction: discord.Interaction, amount: int, user: Optional[discord.Member] = None):
+async def subcredits_cmd(interaction: discord.Interaction, amount: int, user: Optional[discord.User] = None):
     if not await require_access(interaction, "subcredits"):
         return
 
@@ -283,7 +297,7 @@ async def subcredits_cmd(interaction: discord.Interaction, amount: int, user: Op
 
 @bot.tree.command(name="setcredits", description="set a user credits to an exact amount")
 @app_commands.describe(user="the user to set credits for", amount="new credits amount")
-async def setcredits_cmd(interaction: discord.Interaction, user: discord.Member, amount: int):
+async def setcredits_cmd(interaction: discord.Interaction, user: discord.User, amount: int):
     if not await require_access(interaction, "setcredits"):
         return
 
@@ -298,85 +312,51 @@ async def setcredits_cmd(interaction: discord.Interaction, user: discord.Member,
     )
 
 
-@bot.tree.command(name="whitelist", description="add a whitelist role to a user")
-@app_commands.describe(user="the user to role", role="which role to add")
-@app_commands.choices(role=role_choice_autocomplete())
-async def whitelist_cmd(interaction: discord.Interaction, user: discord.Member, role: app_commands.Choice[str]):
+@bot.tree.command(name="whitelist", description="give a stored whitelist role to a user")
+@app_commands.describe(user="the user to whitelist", role="which role to add")
+@app_commands.choices(role=role_choices())
+async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, role: app_commands.Choice[str]):
     if not await require_access(interaction, "whitelist"):
         return
 
-    guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message("this command can only be used in a server.", ephemeral=True)
+    role_value = str(role.value).lower().strip()
+    if role_value not in valid_roles:
+        await interaction.response.send_message("invalid role.", ephemeral=True)
         return
 
-    role_name = role.value
-    target_role = discord.utils.get(guild.roles, name=role_name)
-    if target_role is None:
-        await interaction.response.send_message(f"role `{role_name}` was not found in this server.", ephemeral=True)
-        return
-
-    try:
-        await user.add_roles(target_role, reason="whitelist command")
-    except discord.Forbidden:
-        await interaction.response.send_message("i do not have permission to add that role.", ephemeral=True)
-        return
-
-    # record so unwhitelist can remove what the bot added
     assert bot.pool is not None
     async with bot.pool.acquire() as con:
         await con.execute(
             """
-            insert into whitelists (user_id, role_id)
+            insert into whitelist_roles (user_id, role)
             values ($1, $2)
             on conflict do nothing;
             """,
             int(user.id),
-            int(target_role.id),
+            role_value,
         )
 
-    await interaction.response.send_message(f"added role `{role_name}` to <@{int(user.id)}>*.", ephemeral=True)
+    await interaction.response.send_message(
+        f"added stored role `{role_value}` to <@{int(user.id)}>*.",
+        ephemeral=True,
+    )
 
 
-@bot.tree.command(name="unwhitelist", description="remove all whitelist roles added to a user")
+@bot.tree.command(name="unwhitelist", description="remove all stored whitelist roles from a user")
 @app_commands.describe(user="the user to unwhitelist")
-async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.Member):
+async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
     if not await require_access(interaction, "unwhitelist"):
-        return
-
-    guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message("this command can only be used in a server.", ephemeral=True)
         return
 
     assert bot.pool is not None
     async with bot.pool.acquire() as con:
-        rows = await con.fetch(
-            "select role_id from whitelists where user_id = $1;",
-            int(user.id),
-        )
+        res = await con.execute("delete from whitelist_roles where user_id = $1;", int(user.id))
 
-    if not rows:
-        await interaction.response.send_message("no roles to remove for that user.", ephemeral=True)
-        return
-
-    removed = 0
-    for r in rows:
-        rid = int(r["role_id"])
-        role_obj = guild.get_role(rid)
-        if role_obj is None:
-            continue
-        try:
-            if role_obj in user.roles:
-                await user.remove_roles(role_obj, reason="unwhitelist command")
-                removed += 1
-        except discord.Forbidden:
-            pass
-
-    async with bot.pool.acquire() as con:
-        await con.execute("delete from whitelists where user_id = $1;", int(user.id))
-
-    await interaction.response.send_message(f"removed {removed} whitelist role(s) from <@{int(user.id)}>*.", ephemeral=True)
+    # res looks like: "delete 3"
+    await interaction.response.send_message(
+        f"removed stored roles from <@{int(user.id)}>* ({res.lower()}).",
+        ephemeral=True,
+    )
 
 
 @bot.event
