@@ -93,54 +93,6 @@ class credit_bot(commands.Bot):
 
 bot = credit_bot()
 
-async def resolve_target_user(interaction: discord.Interaction, option_name: str) -> Optional[discord.User]:
-    data = getattr(interaction, "data", None) or {}
-
-    # best case: discord includes resolved objects
-    resolved = data.get("resolved") or {}
-    users = resolved.get("users") or {}
-    members = resolved.get("members") or {}
-
-    options = data.get("options") or []
-    for opt in options:
-        if opt.get("name") != option_name:
-            continue
-
-        raw = opt.get("value")
-        if raw is None:
-            return None
-
-        try:
-            uid = int(raw)
-        except Exception:
-            # sometimes it comes as "<@id>" or "<@!id>"
-            s = str(raw).replace("<@!", "").replace("<@", "").replace(">", "").strip()
-            if not s.isdigit():
-                return None
-            uid = int(s)
-
-        # try resolved user first
-        u = users.get(str(uid))
-        if u is not None:
-            try:
-                return discord.User(state=interaction.client._connection, data=u)  # type: ignore
-            except Exception:
-                pass
-
-        # if member resolved exists, still fetch as user
-        if str(uid) in members:
-            try:
-                return await interaction.client.fetch_user(uid)
-            except Exception:
-                return None
-
-        # final fallback: fetch from api
-        try:
-            return await interaction.client.fetch_user(uid)
-        except Exception:
-            return None
-
-    return None
 
 async def get_credits(user_id: int) -> int:
     assert bot.pool is not None
@@ -275,6 +227,44 @@ def role_choices() -> list[app_commands.Choice[str]]:
     ]
 
 
+async def resolve_target_user(interaction: discord.Interaction, option_name: str) -> Optional[discord.User]:
+    data = getattr(interaction, "data", None) or {}
+
+    resolved = data.get("resolved") or {}
+    users = resolved.get("users") or {}
+
+    options = data.get("options") or []
+    for opt in options:
+        if opt.get("name") != option_name:
+            continue
+
+        raw = opt.get("value")
+        if raw is None:
+            return None
+
+        try:
+            uid = int(raw)
+        except Exception:
+            s = str(raw).replace("<@!", "").replace("<@", "").replace(">", "").strip()
+            if not s.isdigit():
+                return None
+            uid = int(s)
+
+        u = users.get(str(uid))
+        if u is not None:
+            try:
+                return discord.User(state=interaction.client._connection, data=u)  # type: ignore
+            except Exception:
+                pass
+
+        try:
+            return await interaction.client.fetch_user(uid)
+        except Exception:
+            return None
+
+    return None
+
+
 @bot.tree.command(name="credits", description="check credits for a user")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -329,7 +319,12 @@ async def addcredits_cmd(interaction: discord.Interaction, amount: int, user: Op
         await interaction.response.send_message("amount must be greater than 0.", ephemeral=True)
         return
 
-    target = user or interaction.user
+    target = user
+    if target is None:
+        target = await resolve_target_user(interaction, "user")
+    if target is None:
+        target = interaction.user
+
     new_val = await add_credits(int(target.id), int(amount))
     await interaction.response.send_message(
         f"added {format_credits(amount)} credits to <@{int(target.id)}>. new total: {format_credits(new_val)}.",
@@ -349,7 +344,12 @@ async def subcredits_cmd(interaction: discord.Interaction, amount: int, user: Op
         await interaction.response.send_message("amount must be greater than 0.", ephemeral=True)
         return
 
-    target = user or interaction.user
+    target = user
+    if target is None:
+        target = await resolve_target_user(interaction, "user")
+    if target is None:
+        target = interaction.user
+
     new_val = await sub_credits(int(target.id), int(amount))
     await interaction.response.send_message(
         f"subtracted {format_credits(amount)} credits from <@{int(target.id)}>. new total: {format_credits(new_val)}.",
@@ -365,13 +365,20 @@ async def setcredits_cmd(interaction: discord.Interaction, user: discord.User, a
     if not await require_access(interaction, "setcredits"):
         return
 
+    target = user
+    if target is None:
+        target = await resolve_target_user(interaction, "user")
+    if target is None:
+        await interaction.response.send_message("you must provide a user.", ephemeral=True)
+        return
+
     if amount < 0:
         await interaction.response.send_message("amount cannot be negative.", ephemeral=True)
         return
 
-    new_val = await set_credits(int(user.id), int(amount))
+    new_val = await set_credits(int(target.id), int(amount))
     await interaction.response.send_message(
-        f"set <@{int(user.id)}> credits to {format_credits(new_val)}.",
+        f"set <@{int(target.id)}> credits to {format_credits(new_val)}.",
         ephemeral=True,
     )
 
@@ -383,6 +390,13 @@ async def setcredits_cmd(interaction: discord.Interaction, user: discord.User, a
 @app_commands.choices(role=role_choices())
 async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, role: app_commands.Choice[str]):
     if not await require_access(interaction, "whitelist"):
+        return
+
+    target = user
+    if target is None:
+        target = await resolve_target_user(interaction, "user")
+    if target is None:
+        await interaction.response.send_message("you must provide a user.", ephemeral=True)
         return
 
     role_value = str(role.value).lower().strip()
@@ -398,12 +412,12 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, ro
             values ($1, $2)
             on conflict do nothing;
             """,
-            int(user.id),
+            int(target.id),
             role_value,
         )
 
     await interaction.response.send_message(
-        f"added stored role `{role_value}` to <@{int(user.id)}>*.",
+        f"added stored role `{role_value}` to <@{int(target.id)}>*.",
         ephemeral=True,
     )
 
@@ -416,12 +430,19 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
     if not await require_access(interaction, "unwhitelist"):
         return
 
+    target = user
+    if target is None:
+        target = await resolve_target_user(interaction, "user")
+    if target is None:
+        await interaction.response.send_message("you must provide a user.", ephemeral=True)
+        return
+
     assert bot.pool is not None
     async with bot.pool.acquire() as con:
-        res = await con.execute("delete from whitelist_roles where user_id = $1;", int(user.id))
+        res = await con.execute("delete from whitelist_roles where user_id = $1;", int(target.id))
 
     await interaction.response.send_message(
-        f"removed stored roles from <@{int(user.id)}>* ({res.lower()}).",
+        f"removed stored roles from <@{int(target.id)}>* ({res.lower()}).",
         ephemeral=True,
     )
 
