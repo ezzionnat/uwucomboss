@@ -281,9 +281,7 @@ async def credits_cmd(interaction: discord.Interaction, user: Optional[discord.U
 
     amount = await get_credits(int(target.id))
 
-    # try to use server display name when available, otherwise fallback to username
-    display_name = getattr(target, "display_name", None) or getattr(target, "global_name", None) or target.name
-    e = make_embed(f"{display_name} credits", [f"**{format_credits(amount)} credits**"])
+    e = make_embed(f"{target.name} credits", [f"**{format_credits(amount)} credits**"])
     await interaction.response.send_message(embed=e)
 
 
