@@ -858,6 +858,39 @@ async def wipe_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message("wiped all credits.", ephemeral=True)
 
+@bot.tree.command(
+    name="user-to-id",
+    description="convert a roblox username to a user id"
+)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(username="roblox username")
+async def user_to_id_cmd(interaction: discord.Interaction, username: str):
+    if not roblox_api_key:
+        await interaction.response.send_message(
+            "roblox api key is missing.",
+            ephemeral=True
+        )
+        return
+
+    assert bot.rbx_http is not None
+
+    await interaction.response.defer(ephemeral=False)
+
+    user_id = await roblox_username_to_user_id(bot.rbx_http, username)
+
+    if not user_id:
+        await interaction.followup.send(
+            f"could not find roblox user `{username}`.",
+            ephemeral=False
+        )
+        return
+
+    await interaction.followup.send(
+        f"roblox user `{username}` → id `{user_id}`",
+        ephemeral=False
+    )
+
 
 @bot.tree.command(name="whitelist", description="give a stored whitelist role to a user")
 @app_commands.allowed_installs(guilds=True, users=True)
