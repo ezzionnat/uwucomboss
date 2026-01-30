@@ -65,6 +65,12 @@ def make_embed(title: str, lines: list[str]) -> discord.Embed:
 def is_digits(s: str) -> bool:
     return bool(s) and s.isdigit()
 
+def parse_membership_id(m: dict) -> str:
+    p = str(m.get("path") or m.get("name") or "").strip()
+    if not p:
+        return ""
+    return p.split("/")[-1].strip()
+
 
 async def roblox_username_to_user_id(client: httpx.AsyncClient, username: str) -> Optional[int]:
     username = (username or "").strip()
@@ -694,7 +700,7 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
     role_id = int(ranking)
 
     try:
-        await ensure_roblox_roles_loaded()
+        await ensure_roblox_roles_loaded(force=True)
     except Exception:
         pass
 
@@ -708,19 +714,20 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         await interaction.followup.send("user is not in the group.", ephemeral=True)
         return
 
-    membership_path = str(m.get("path") or m.get("name") or "")
-    membership_id = membership_path.split("/")[-1] if membership_path else ""
+    membership_id = parse_membership_id(m)
     if not membership_id:
         await interaction.followup.send("could not read membership id.", ephemeral=True)
         return
 
     current_role_path = str(m.get("role") or "")
     current_role_id = parse_role_id_from_path(current_role_path)
-
     lowest = bot._rbx_lowest_role_id
 
     if current_role_id is not None and lowest is not None and current_role_id != lowest:
-        await interaction.followup.send("user already has a rank in group, use /unrole on them.", ephemeral=True)
+        await interaction.followup.send(
+            "user already has a rank in group, use /unrole on them.",
+            ephemeral=True,
+        )
         return
 
     try:
@@ -779,8 +786,7 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
         await interaction.followup.send("user is not in the group.", ephemeral=True)
         return
 
-    membership_name = str(m.get("name") or "")
-    membership_id = membership_name.split("/")[-1] if membership_name else ""
+    membership_id = parse_membership_id(m)
     if not membership_id:
         await interaction.followup.send("could not read membership id.", ephemeral=True)
         return
