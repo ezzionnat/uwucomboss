@@ -15,6 +15,8 @@ owner_ids_raw = os.getenv("owner_ids", "")
 
 # roblox open cloud (do not paste in code)
 roblox_api_key = os.getenv("roblox_api_key", "").strip()
+print("roblox_api_key present:", bool(roblox_api_key))
+print("roblox_api_key length:", len(roblox_api_key))
 
 # group id is fixed per your request
 ROBLOX_GROUP_ID = "174571331"
