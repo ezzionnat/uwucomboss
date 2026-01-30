@@ -631,9 +631,10 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
     current_role_id = parse_role_id_from_path(current_role_path)
 
     base_role = bot._rbx_lowest_assignable_role_id
-    if current_role_id is not None and base_role is not None and current_role_id != base_role:
-        await interaction.followup.send("user already has a rank in group, use /unrole on them.", ephemeral=False)
-        return
+    
+    old_name = None
+    if current_role_id is not None:
+        old_name, _ = rbx_role_info_by_id(int(current_role_id))
 
     try:
         await roblox_set_role_by_membership_id(bot.rbx_http, membership_id, role_id)
@@ -641,14 +642,19 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         await interaction.followup.send(f"failed: {e}", ephemeral=False)
         return
 
-    role_name, _rank = rbx_role_info_by_id(role_id)
+    new_name, _ = rbx_role_info_by_id(role_id)
 
-    # public response (NOT the same as log)
-    await interaction.followup.send(f"roled `{target_user_id}` to `{role_name}`", ephemeral=False)
+    # public response
+    await interaction.followup.send(f"roled `{target_user_id}` to `{new_name}`", ephemeral=False)
 
-    # log message (minimalistic)
-    log_msg = f"{interaction.user.mention} has roled `{target_user_id}` to `{role_name}`"
-    await send_role_log(interaction, log_msg)
+    # log message
+        # if they already had a real role (not base), log it as a change
+        if base_role is not None and current_role_id is not None and int(current_role_id) != int(base_role) and old_name:
+            log_msg = f"{interaction.user.mention} changed `{target_user_id}` from `{old_name}` to `{new_name}`"
+        else:
+            log_msg = f"{interaction.user.mention} has roled `{target_user_id}` to `{new_name}`"
+
+        await send_role_log(interaction, log_msg)
 
 
 @bot.tree.command(name="unrole", description="remove a user's rank (sets them to the lowest assignable group role)")
