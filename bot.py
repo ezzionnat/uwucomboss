@@ -644,17 +644,31 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
 
     new_name, _ = rbx_role_info_by_id(role_id)
 
-    # public response
-    await interaction.followup.send(f"roled `{target_user_id}` to `{new_name}`", ephemeral=False)
+        # public response
+    await interaction.followup.send(
+        f"roled `{target_user_id}` to `{new_name}`",
+        ephemeral=False
+    )
 
     # log message
-        # if they already had a real role (not base), log it as a change
-        if base_role is not None and current_role_id is not None and int(current_role_id) != int(base_role) and old_name:
-            log_msg = f"{interaction.user.mention} changed `{target_user_id}` from `{old_name}` to `{new_name}`"
-        else:
-            log_msg = f"{interaction.user.mention} has roled `{target_user_id}` to `{new_name}`"
-
-        await send_role_log(interaction, log_msg)
+    # if they already had a real role (not base), log it as a change
+    if (
+        base_role is not None
+        and current_role_id is not None
+        and int(current_role_id) != int(base_role)
+        and old_name
+    ):
+        log_msg = (
+            f"{interaction.user.mention} changed `{target_user_id}` "
+            f"from `{old_name}` to `{new_name}`"
+        )
+    else:
+        log_msg = (
+            f"{interaction.user.mention} has roled `{target_user_id}` "
+            f"to `{new_name}`"
+        )
+    
+    await send_role_log(interaction, log_msg)
 
 
 
