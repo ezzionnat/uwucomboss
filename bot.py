@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Optional
 
 import asyncpg
@@ -810,7 +811,19 @@ def main():
         raise RuntimeError("missing discord_token")
     if not database_url:
         raise RuntimeError("missing database_url")
-    bot.run(token)
+
+    delay = 5
+    while True:
+        try:
+            bot.run(token)
+            break
+        except discord.HTTPException as e:
+            if getattr(e, "status", None) == 429:
+                print(f"hit discord 429, sleeping {delay}s before retry")
+                time.sleep(delay)
+                delay = min(delay * 2, 300)
+                continue
+            raise
 
 
 if __name__ == "__main__":
