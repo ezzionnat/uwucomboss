@@ -1,5 +1,4 @@
 import os
-import time
 from typing import Optional
 
 import asyncpg
@@ -66,12 +65,6 @@ def make_embed(title: str, lines: list[str]) -> discord.Embed:
 def is_digits(s: str) -> bool:
     return bool(s) and s.isdigit()
 
-def parse_membership_id(m: dict) -> str:
-    p = str(m.get("path") or m.get("name") or "").strip()
-    if not p:
-        return ""
-    return p.split("/")[-1].strip()
-
 
 async def roblox_username_to_user_id(client: httpx.AsyncClient, username: str) -> Optional[int]:
     username = (username or "").strip()
@@ -112,58 +105,50 @@ def parse_role_id_from_path(role_path: str) -> Optional[int]:
         return None
 
 
+def parse_membership_id_from_path(path: str) -> Optional[str]:
+    # expected: "groups/<groupId>/memberships/<membershipId>"
+    if not path:
+        return None
+    parts = str(path).split("/")
+    if len(parts) < 4:
+        return None
+    if parts[-2] != "memberships":
+        return None
+    mid = parts[-1].strip()
+    return mid or None
+
+
 async def roblox_list_roles(client: httpx.AsyncClient) -> list[dict]:
-    r = await client.get(
-        f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/roles",
-        headers=roblox_headers(),
-    )
+    r = await client.get(f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/roles", headers=roblox_headers())
     r.raise_for_status()
     data = r.json() if r.content else {}
-
-    # roblox may return roles under different keys
-    if isinstance(data.get("roles"), list):
-        return data["roles"]
-
-    if isinstance(data.get("groupRoles"), list):
-        return data["groupRoles"]
-
-    if isinstance(data.get("data"), list):
-        return data["data"]
-
-    return []
+    # roblox returns groupRoles (and sometimes roles depending on docs versions)
+    return data.get("groupRoles") or data.get("roles") or []
 
 
 async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Optional[dict]:
+    # filter lookup so we don’t scan the whole group
     params = {
         "maxPageSize": "10",
-        "filter": f"user=='users/{int(user_id)}'",
+        "filter": f"user == 'users/{int(user_id)}'",
     }
-
     r = await client.get(
         f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/memberships",
         headers=roblox_headers(),
         params=params,
     )
     r.raise_for_status()
-
     data = r.json() if r.content else {}
-
-    # your api returns this shape
-    memberships = data.get("groupMemberships") or []
-
-    # fallbacks, just in case roblox changes again
-    if not memberships:
-        memberships = data.get("memberships") or data.get("data") or []
-
+    memberships = data.get("groupMemberships") or data.get("memberships") or []
     if not memberships:
         return None
-
     return memberships[0]
 
 
-
 async def roblox_set_role_by_membership_id(client: httpx.AsyncClient, membership_id: str, role_id: int) -> None:
-    body = {"role": {"path": f"groups/{ROBLOX_GROUP_ID}/roles/{int(role_id)}"}}
+    # correct payload shape for this endpoint:
+    # { "role": "groups/<groupId>/roles/<roleId>" }
+    body = {"role": f"groups/{ROBLOX_GROUP_ID}/roles/{int(role_id)}"}
 
     r = await client.patch(
         f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/memberships/{membership_id}",
@@ -172,6 +157,13 @@ async def roblox_set_role_by_membership_id(client: httpx.AsyncClient, membership
     )
 
     if r.status_code >= 400:
+        # try to show roblox error body if present
+        try:
+            data = r.json()
+        except Exception:
+            data = None
+        if data:
+            raise RuntimeError(f"roblox error {r.status_code}: {data}")
         txt = (r.text or "")[:300]
         raise RuntimeError(f"roblox error {r.status_code}: {txt}")
 
@@ -183,8 +175,9 @@ class credit_bot(commands.Bot):
         self.pool: Optional[asyncpg.Pool] = None
         self.rbx_http: Optional[httpx.AsyncClient] = None
 
+        # roblox roles cache
         self._rbx_roles: list[dict] = []
-        self._rbx_lowest_role_id: Optional[int] = None
+        self._rbx_lowest_assignable_role_id: Optional[int] = None
 
     async def setup_hook(self):
         self.rbx_http = httpx.AsyncClient(timeout=25)
@@ -222,6 +215,7 @@ class credit_bot(commands.Bot):
     async def close(self):
         if self.rbx_http:
             await self.rbx_http.aclose()
+
         if self.pool:
             await self.pool.close()
         await super().close()
@@ -413,22 +407,46 @@ async def ensure_roblox_roles_loaded(force: bool = False) -> None:
     roles = await roblox_list_roles(bot.rbx_http)
     bot._rbx_roles = roles
 
-    lowest_id: Optional[int] = None
+    # pick the lowest assignable role:
+    # - must have an int rank
+    # - rank must be > 0
+    # - exclude "guest" by name (roblox often blocks assigning guest)
     lowest_rank: Optional[int] = None
+    lowest_role_id: Optional[int] = None
+
     for r in roles:
-        role_path = str(r.get("name") or r.get("path") or "")
-        rid = parse_role_id_from_path(role_path)
-        if rid is None:
+        display = str(r.get("displayName") or "").strip().lower()
+
+        # common non-assignable
+        if display == "guest":
             continue
+
         try:
             rk = int(r.get("rank"))
         except Exception:
             continue
+
+        if rk <= 0:
+            continue
+
+        rid = None
+        if "id" in r:
+            try:
+                rid = int(r.get("id"))
+            except Exception:
+                rid = None
+        if rid is None:
+            role_path = str(r.get("path") or r.get("name") or "")
+            rid = parse_role_id_from_path(role_path)
+
+        if rid is None:
+            continue
+
         if lowest_rank is None or rk < lowest_rank:
             lowest_rank = rk
-            lowest_id = rid
+            lowest_role_id = rid
 
-    bot._rbx_lowest_role_id = lowest_id
+    bot._rbx_lowest_assignable_role_id = lowest_role_id
 
 
 async def ranking_autocomplete(interaction: discord.Interaction, current: str):
@@ -442,12 +460,25 @@ async def ranking_autocomplete(interaction: discord.Interaction, current: str):
 
     for r in bot._rbx_roles:
         display = str(r.get("displayName") or "").strip()
-        role_path = str(r.get("name") or r.get("path") or "")
-        rid = parse_role_id_from_path(role_path)
-        if not display or rid is None:
+        if not display:
             continue
 
+        # match substring
         if current and current not in display.lower():
+            continue
+
+        # role id: prefer "id" if present
+        rid: Optional[int] = None
+        if "id" in r:
+            try:
+                rid = int(r.get("id"))
+            except Exception:
+                rid = None
+        if rid is None:
+            role_path = str(r.get("path") or r.get("name") or "")
+            rid = parse_role_id_from_path(role_path)
+
+        if rid is None:
             continue
 
         out.append(app_commands.Choice(name=f"{display} ({rid})", value=str(rid)))
@@ -632,6 +663,13 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
     )
 
 
+# -------------------------
+# roblox commands you asked for
+# /roles   -> list all roles in the group available
+# /role    -> rank a user to a role (autocomplete)
+# /unrole  -> set user to lowest assignable role (not guest)
+# -------------------------
+
 @bot.tree.command(name="roles", description="list all roles in the roblox group")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -643,7 +681,6 @@ async def roles_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=True)
         return
 
-    assert bot.rbx_http is not None
     await interaction.response.defer(ephemeral=True)
 
     try:
@@ -660,8 +697,17 @@ async def roles_cmd(interaction: discord.Interaction):
     for r in bot._rbx_roles[:50]:
         display = str(r.get("displayName") or "unknown")
         rank = str(r.get("rank") or "unknown")
-        role_path = str(r.get("name") or r.get("path") or "")
-        rid = parse_role_id_from_path(role_path)
+
+        rid: Optional[int] = None
+        if "id" in r:
+            try:
+                rid = int(r.get("id"))
+            except Exception:
+                rid = None
+        if rid is None:
+            role_path = str(r.get("path") or r.get("name") or "")
+            rid = parse_role_id_from_path(role_path)
+
         rid_str = str(rid) if rid is not None else "unknown"
         lines.append(f"- {display} | rank {rank} | role_id `{rid_str}`")
 
@@ -682,7 +728,10 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=True)
         return
 
-    assert bot.rbx_http is not None
+    if bot.rbx_http is None:
+        await interaction.response.send_message("roblox http client not ready.", ephemeral=True)
+        return
+
     await interaction.response.defer(ephemeral=True)
 
     raw = (id or "").strip()
@@ -703,7 +752,7 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
     role_id = int(ranking)
 
     try:
-        await ensure_roblox_roles_loaded(force=True)
+        await ensure_roblox_roles_loaded()
     except Exception:
         pass
 
@@ -717,20 +766,21 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         await interaction.followup.send("user is not in the group.", ephemeral=True)
         return
 
-    membership_id = parse_membership_id(m)
+    membership_path = str(m.get("path") or "")
+    membership_id = parse_membership_id_from_path(membership_path)
     if not membership_id:
-        await interaction.followup.send("could not read membership id.", ephemeral=True)
+        # helpful debug so you can see what roblox returned
+        await interaction.followup.send(f"could not read membership id. path: `{membership_path}`", ephemeral=True)
         return
 
     current_role_path = str(m.get("role") or "")
     current_role_id = parse_role_id_from_path(current_role_path)
-    lowest = bot._rbx_lowest_role_id
 
-    if current_role_id is not None and lowest is not None and current_role_id != lowest:
-        await interaction.followup.send(
-            "user already has a rank in group, use /unrole on them.",
-            ephemeral=True,
-        )
+    base_role = bot._rbx_lowest_assignable_role_id
+
+    # if they already have a rank above base, force /unrole first
+    if current_role_id is not None and base_role is not None and current_role_id != base_role:
+        await interaction.followup.send("user already has a rank in group, use /unrole on them.", ephemeral=True)
         return
 
     try:
@@ -739,10 +789,10 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         await interaction.followup.send(f"failed: {e}", ephemeral=True)
         return
 
-    await interaction.followup.send(f"done. set `{target_user_id}` to role `{role_id}`.", ephemeral=True)
+    await interaction.followup.send(f"done. set `{target_user_id}` to role_id `{role_id}`.", ephemeral=True)
 
 
-@bot.tree.command(name="unrole", description="remove a user's rank (sets them to the lowest group role)")
+@bot.tree.command(name="unrole", description="remove a user's rank (sets them to the lowest assignable group role)")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(id="roblox user id (or username)")
@@ -754,7 +804,10 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
         await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=True)
         return
 
-    assert bot.rbx_http is not None
+    if bot.rbx_http is None:
+        await interaction.response.send_message("roblox http client not ready.", ephemeral=True)
+        return
+
     await interaction.response.defer(ephemeral=True)
 
     raw = (id or "").strip()
@@ -774,9 +827,9 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
         await interaction.followup.send(f"failed: {e}", ephemeral=True)
         return
 
-    lowest = bot._rbx_lowest_role_id
-    if lowest is None:
-        await interaction.followup.send("could not determine lowest role in group.", ephemeral=True)
+    base_role = bot._rbx_lowest_assignable_role_id
+    if base_role is None:
+        await interaction.followup.send("could not determine lowest assignable role in group.", ephemeral=True)
         return
 
     try:
@@ -789,18 +842,19 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
         await interaction.followup.send("user is not in the group.", ephemeral=True)
         return
 
-    membership_id = parse_membership_id(m)
+    membership_path = str(m.get("path") or "")
+    membership_id = parse_membership_id_from_path(membership_path)
     if not membership_id:
-        await interaction.followup.send("could not read membership id.", ephemeral=True)
+        await interaction.followup.send(f"could not read membership id. path: `{membership_path}`", ephemeral=True)
         return
 
     try:
-        await roblox_set_role_by_membership_id(bot.rbx_http, membership_id, int(lowest))
+        await roblox_set_role_by_membership_id(bot.rbx_http, membership_id, int(base_role))
     except Exception as e:
         await interaction.followup.send(f"failed: {e}", ephemeral=True)
         return
 
-    await interaction.followup.send(f"done. reset `{target_user_id}` to lowest role `{lowest}`.", ephemeral=True)
+    await interaction.followup.send(f"done. reset `{target_user_id}` to base role_id `{base_role}`.", ephemeral=True)
 
 
 @bot.event
@@ -813,19 +867,7 @@ def main():
         raise RuntimeError("missing discord_token")
     if not database_url:
         raise RuntimeError("missing database_url")
-
-    delay = 5
-    while True:
-        try:
-            bot.run(token)
-            break
-        except discord.HTTPException as e:
-            if getattr(e, "status", None) == 429:
-                print(f"hit discord 429, sleeping {delay}s before retry")
-                time.sleep(delay)
-                delay = min(delay * 2, 300)
-                continue
-            raise
+    bot.run(token)
 
 
 if __name__ == "__main__":
