@@ -307,15 +307,12 @@ async def get_access_level(user_id: int) -> str:
 
 
 def can_use_command(level: str, command: str) -> bool:
-    # public credits cmds
     if command in {"credits", "creditsleaderboard"}:
         return True
 
-    # roblox cmds: owners + managers only
     if command in {"role", "unrole", "roles", "rolecheck"}:
         return level in {"owners", "manager"}
 
-    # everything else is your existing system
     if level == "owners":
         return True
 
@@ -328,14 +325,14 @@ def can_use_command(level: str, command: str) -> bool:
     return False
 
 
-async def require_access(interaction: discord.Interaction, command: str) -> bool:
+async def require_access(interaction: discord.Interaction, command: str, ephemeral: bool = True) -> bool:
     uid = int(interaction.user.id)
     level = await get_access_level(uid)
     if not can_use_command(level, command):
         if interaction.response.is_done():
-            await interaction.followup.send("you do not have permission to use this command.")
+            await interaction.followup.send("you do not have permission to use this command.", ephemeral=ephemeral)
         else:
-            await interaction.response.send_message("you do not have permission to use this command.")
+            await interaction.response.send_message("you do not have permission to use this command.", ephemeral=ephemeral)
         return False
     return True
 
@@ -346,43 +343,6 @@ def role_choices() -> list[app_commands.Choice[str]]:
         app_commands.Choice(name="manager", value="manager"),
         app_commands.Choice(name="staff", value="staff"),
     ]
-
-
-async def resolve_target_user(interaction: discord.Interaction, option_name: str) -> Optional[discord.User]:
-    data = getattr(interaction, "data", None) or {}
-    resolved = data.get("resolved") or {}
-    users = resolved.get("users") or {}
-
-    options = data.get("options") or []
-    for opt in options:
-        if opt.get("name") != option_name:
-            continue
-
-        raw = opt.get("value")
-        if raw is None:
-            return None
-
-        try:
-            uid = int(raw)
-        except Exception:
-            s = str(raw).replace("<@!", "").replace("<@", "").replace(">", "").strip()
-            if not s.isdigit():
-                return None
-            uid = int(s)
-
-        u = users.get(str(uid))
-        if u is not None:
-            try:
-                return discord.User(state=interaction.client._connection, data=u)  # type: ignore
-            except Exception:
-                pass
-
-        try:
-            return await interaction.client.fetch_user(uid)
-        except Exception:
-            return None
-
-    return None
 
 
 async def ensure_roblox_roles_loaded(force: bool = False) -> None:
@@ -396,7 +356,6 @@ async def ensure_roblox_roles_loaded(force: bool = False) -> None:
     roles = await roblox_list_roles(bot.rbx_http)
     bot._rbx_roles = roles
 
-    # lowest assignable role (exclude guest, rank <= 0)
     lowest_rank: Optional[int] = None
     lowest_role_id: Optional[int] = None
 
@@ -418,11 +377,9 @@ async def ensure_roblox_roles_loaded(force: bool = False) -> None:
                 rid = int(r.get("id"))
             except Exception:
                 rid = None
-
         if rid is None:
             role_path = str(r.get("path") or r.get("name") or "")
             rid = parse_role_id_from_path(role_path)
-
         if rid is None:
             continue
 
@@ -434,7 +391,6 @@ async def ensure_roblox_roles_loaded(force: bool = False) -> None:
 
 
 def rbx_role_info_by_id(role_id: int) -> tuple[str, str]:
-    # returns (displayName, rankStr)
     for r in bot._rbx_roles:
         rid: Optional[int] = None
         if "id" in r:
@@ -492,6 +448,7 @@ async def ranking_autocomplete(interaction: discord.Interaction, current: str):
 
 
 async def send_role_log(interaction: discord.Interaction, text: str) -> None:
+    # only log if this was used in a guild
     if interaction.guild is None:
         return
 
@@ -509,18 +466,22 @@ async def send_role_log(interaction: discord.Interaction, text: str) -> None:
 
 
 # -------------------------
-# roblox commands (public responses)
+# roblox commands
 # -------------------------
 
 @bot.tree.command(name="roles", description="list all roles in the roblox group")
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def roles_cmd(interaction: discord.Interaction):
-    if not await require_access(interaction, "roles"):
+    if not await require_access(interaction, "roles", ephemeral=False):
         return
 
     if not roblox_api_key:
-        await interaction.response.send_message("missing roblox_api_key in environment variables.")
+        await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=False)
+        return
+
+    if bot.rbx_http is None:
+        await interaction.response.send_message("roblox http client not ready.", ephemeral=False)
         return
 
     await interaction.response.defer(thinking=True)
@@ -528,11 +489,11 @@ async def roles_cmd(interaction: discord.Interaction):
     try:
         await ensure_roblox_roles_loaded(force=True)
     except Exception as e:
-        await interaction.followup.send(f"failed: {e}")
+        await interaction.followup.send(f"failed: {e}", ephemeral=False)
         return
 
     if not bot._rbx_roles:
-        await interaction.followup.send("no roles returned.")
+        await interaction.followup.send("no roles returned.", ephemeral=False)
         return
 
     lines: list[str] = []
@@ -554,26 +515,27 @@ async def roles_cmd(interaction: discord.Interaction):
         lines.append(f"- {display} | rank {rank} | role_id `{rid_str}`")
 
     e = make_embed("roblox group roles", lines)
-    await interaction.followup.send(embed=e)
+    await interaction.followup.send(embed=e, ephemeral=False)
 
 
 @bot.tree.command(name="rolecheck", description="check a roblox user's current group role")
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(id="roblox user id (or username)")
 async def rolecheck_cmd(interaction: discord.Interaction, id: str):
-    if not await require_access(interaction, "rolecheck"):
+    # rolecheck must be invisible
+    if not await require_access(interaction, "rolecheck", ephemeral=True):
         return
 
     if not roblox_api_key:
-        await interaction.response.send_message("missing roblox_api_key in environment variables.")
+        await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=True)
         return
 
     if bot.rbx_http is None:
-        await interaction.response.send_message("roblox http client not ready.")
+        await interaction.response.send_message("roblox http client not ready.", ephemeral=True)
         return
 
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer(thinking=True, ephemeral=True)
 
     raw = (id or "").strip()
     target_user_id: Optional[int] = None
@@ -583,7 +545,7 @@ async def rolecheck_cmd(interaction: discord.Interaction, id: str):
         target_user_id = await roblox_username_to_user_id(bot.rbx_http, raw)
 
     if not target_user_id:
-        await interaction.followup.send("invalid id. provide a roblox user id or username.")
+        await interaction.followup.send("invalid id. provide a roblox user id or username.", ephemeral=True)
         return
 
     try:
@@ -594,39 +556,42 @@ async def rolecheck_cmd(interaction: discord.Interaction, id: str):
     try:
         m = await roblox_get_membership(bot.rbx_http, int(target_user_id))
     except Exception as e:
-        await interaction.followup.send(f"failed: {e}")
+        await interaction.followup.send(f"failed: {e}", ephemeral=True)
         return
 
     if not m:
-        await interaction.followup.send("user is not in the group.")
+        await interaction.followup.send("user is not in the group.", ephemeral=True)
         return
 
     current_role_path = str(m.get("role") or "")
     current_role_id = parse_role_id_from_path(current_role_path)
 
     if current_role_id is None:
-        await interaction.followup.send(f"user `{target_user_id}` role: unknown")
+        await interaction.followup.send(f"user `{target_user_id}` role: unknown", ephemeral=True)
         return
 
     name, rank = rbx_role_info_by_id(int(current_role_id))
-    await interaction.followup.send(f"user `{target_user_id}` role: {name} (rank {rank}) | role_id `{current_role_id}`")
+    await interaction.followup.send(
+        f"user `{target_user_id}` role: {name} (rank {rank}) | role_id `{current_role_id}`",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="role", description="rank a roblox user to a role in the group")
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(id="roblox user id (or username)", ranking="pick a role (autocomplete)")
 @app_commands.autocomplete(ranking=ranking_autocomplete)
 async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
-    if not await require_access(interaction, "role"):
+    if not await require_access(interaction, "role", ephemeral=False):
         return
 
     if not roblox_api_key:
-        await interaction.response.send_message("missing roblox_api_key in environment variables.")
+        await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=False)
         return
 
     if bot.rbx_http is None:
-        await interaction.response.send_message("roblox http client not ready.")
+        await interaction.response.send_message("roblox http client not ready.", ephemeral=False)
         return
 
     await interaction.response.defer(thinking=True)
@@ -639,11 +604,11 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         target_user_id = await roblox_username_to_user_id(bot.rbx_http, raw)
 
     if not target_user_id:
-        await interaction.followup.send("invalid id. provide a roblox user id or username.")
+        await interaction.followup.send("invalid id. provide a roblox user id or username.", ephemeral=False)
         return
 
     if not is_digits(ranking):
-        await interaction.followup.send("invalid ranking selection.")
+        await interaction.followup.send("invalid ranking selection.", ephemeral=False)
         return
 
     role_id = int(ranking)
@@ -656,17 +621,17 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
     try:
         m = await roblox_get_membership(bot.rbx_http, int(target_user_id))
     except Exception as e:
-        await interaction.followup.send(f"failed: {e}")
+        await interaction.followup.send(f"failed: {e}", ephemeral=False)
         return
 
     if not m:
-        await interaction.followup.send("user is not in the group.")
+        await interaction.followup.send("user is not in the group.", ephemeral=False)
         return
 
     membership_path = str(m.get("path") or "")
     membership_id = parse_membership_id_from_path(membership_path)
     if not membership_id:
-        await interaction.followup.send(f"could not read membership id. path: `{membership_path}`")
+        await interaction.followup.send(f"could not read membership id. path: `{membership_path}`", ephemeral=False)
         return
 
     current_role_path = str(m.get("role") or "")
@@ -674,35 +639,39 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
 
     base_role = bot._rbx_lowest_assignable_role_id
     if current_role_id is not None and base_role is not None and current_role_id != base_role:
-        await interaction.followup.send("user already has a rank in group, use /unrole on them.")
+        await interaction.followup.send("user already has a rank in group, use /unrole on them.", ephemeral=False)
         return
 
     try:
         await roblox_set_role_by_membership_id(bot.rbx_http, membership_id, role_id)
     except Exception as e:
-        await interaction.followup.send(f"failed: {e}")
+        await interaction.followup.send(f"failed: {e}", ephemeral=False)
         return
 
     role_name, _rank = rbx_role_info_by_id(role_id)
-    msg = f"{interaction.user.mention} has roled `{target_user_id}` to `{role_name}`"
-    await interaction.followup.send(msg)
-    await send_role_log(interaction, msg)
+
+    # public response (NOT the same as log)
+    await interaction.followup.send(f"roled `{target_user_id}` to `{role_name}`", ephemeral=False)
+
+    # log message (minimalistic)
+    log_msg = f"{interaction.user.mention} has roled `{target_user_id}` to `{role_name}`"
+    await send_role_log(interaction, log_msg)
 
 
 @bot.tree.command(name="unrole", description="remove a user's rank (sets them to the lowest assignable group role)")
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(id="roblox user id (or username)")
 async def unrole_cmd(interaction: discord.Interaction, id: str):
-    if not await require_access(interaction, "unrole"):
+    if not await require_access(interaction, "unrole", ephemeral=False):
         return
 
     if not roblox_api_key:
-        await interaction.response.send_message("missing roblox_api_key in environment variables.")
+        await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=False)
         return
 
     if bot.rbx_http is None:
-        await interaction.response.send_message("roblox http client not ready.")
+        await interaction.response.send_message("roblox http client not ready.", ephemeral=False)
         return
 
     await interaction.response.defer(thinking=True)
@@ -715,50 +684,54 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
         target_user_id = await roblox_username_to_user_id(bot.rbx_http, raw)
 
     if not target_user_id:
-        await interaction.followup.send("invalid id. provide a roblox user id or username.")
+        await interaction.followup.send("invalid id. provide a roblox user id or username.", ephemeral=False)
         return
 
     try:
         await ensure_roblox_roles_loaded(force=True)
     except Exception as e:
-        await interaction.followup.send(f"failed: {e}")
+        await interaction.followup.send(f"failed: {e}", ephemeral=False)
         return
 
     base_role = bot._rbx_lowest_assignable_role_id
     if base_role is None:
-        await interaction.followup.send("could not determine lowest assignable role in group.")
+        await interaction.followup.send("could not determine lowest assignable role in group.", ephemeral=False)
         return
 
     try:
         m = await roblox_get_membership(bot.rbx_http, int(target_user_id))
     except Exception as e:
-        await interaction.followup.send(f"failed: {e}")
+        await interaction.followup.send(f"failed: {e}", ephemeral=False)
         return
 
     if not m:
-        await interaction.followup.send("user is not in the group.")
+        await interaction.followup.send("user is not in the group.", ephemeral=False)
         return
 
     membership_path = str(m.get("path") or "")
     membership_id = parse_membership_id_from_path(membership_path)
     if not membership_id:
-        await interaction.followup.send(f"could not read membership id. path: `{membership_path}`")
+        await interaction.followup.send(f"could not read membership id. path: `{membership_path}`", ephemeral=False)
         return
 
     try:
         await roblox_set_role_by_membership_id(bot.rbx_http, membership_id, int(base_role))
     except Exception as e:
-        await interaction.followup.send(f"failed: {e}")
+        await interaction.followup.send(f"failed: {e}", ephemeral=False)
         return
 
     role_name, _rank = rbx_role_info_by_id(int(base_role))
-    msg = f"{interaction.user.mention} has unroled `{target_user_id}` and their role is now set to `{role_name}`"
-    await interaction.followup.send(msg)
-    await send_role_log(interaction, msg)
+
+    # public response (NOT the same as log)
+    await interaction.followup.send(f"successfully cleared roles for `{target_user_id}`", ephemeral=False)
+
+    # log message (minimalistic)
+    log_msg = f"{interaction.user.mention} has unroled `{target_user_id}` and their role is now set to `{role_name}`"
+    await send_role_log(interaction, log_msg)
 
 
 # -------------------------
-# existing credits + whitelist cmds stay as-is (ephemeral behavior)
+# credits + whitelist cmds
 # -------------------------
 
 @bot.tree.command(name="credits", description="check credits for a user")
@@ -766,7 +739,7 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to check (defaults to you)")
 async def credits_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
-    if not await require_access(interaction, "credits"):
+    if not await require_access(interaction, "credits", ephemeral=True):
         return
 
     target = user or interaction.user
@@ -779,7 +752,7 @@ async def credits_cmd(interaction: discord.Interaction, user: Optional[discord.U
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def creditsleaderboard_cmd(interaction: discord.Interaction):
-    if not await require_access(interaction, "creditsleaderboard"):
+    if not await require_access(interaction, "creditsleaderboard", ephemeral=True):
         return
 
     rows = await leaderboard_rows()
@@ -803,7 +776,7 @@ async def creditsleaderboard_cmd(interaction: discord.Interaction):
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to add credits to (defaults to you)", amount="amount to add")
 async def addcredits_cmd(interaction: discord.Interaction, amount: int, user: Optional[discord.User] = None):
-    if not await require_access(interaction, "addcredits"):
+    if not await require_access(interaction, "addcredits", ephemeral=True):
         return
 
     if amount <= 0:
@@ -823,7 +796,7 @@ async def addcredits_cmd(interaction: discord.Interaction, amount: int, user: Op
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to subtract credits from (defaults to you)", amount="amount to subtract")
 async def subcredits_cmd(interaction: discord.Interaction, amount: int, user: Optional[discord.User] = None):
-    if not await require_access(interaction, "subcredits"):
+    if not await require_access(interaction, "subcredits", ephemeral=True):
         return
 
     if amount <= 0:
@@ -843,7 +816,7 @@ async def subcredits_cmd(interaction: discord.Interaction, amount: int, user: Op
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to set credits for", amount="new credits amount")
 async def setcredits_cmd(interaction: discord.Interaction, user: discord.User, amount: int):
-    if not await require_access(interaction, "setcredits"):
+    if not await require_access(interaction, "setcredits", ephemeral=True):
         return
 
     if amount < 0:
@@ -861,7 +834,8 @@ async def setcredits_cmd(interaction: discord.Interaction, user: discord.User, a
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def wipe_cmd(interaction: discord.Interaction):
-    if not await require_access(interaction, "wipe"):
+    # wipe must be invisible
+    if not await require_access(interaction, "wipe", ephemeral=True):
         return
 
     assert bot.pool is not None
@@ -877,7 +851,7 @@ async def wipe_cmd(interaction: discord.Interaction):
 @app_commands.describe(user="the user to whitelist", role="which role to add")
 @app_commands.choices(role=role_choices())
 async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, role: app_commands.Choice[str]):
-    if not await require_access(interaction, "whitelist"):
+    if not await require_access(interaction, "whitelist", ephemeral=True):
         return
 
     role_value = str(role.value).lower().strip()
@@ -908,7 +882,7 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, ro
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(user="the user to unwhitelist")
 async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
-    if not await require_access(interaction, "unwhitelist"):
+    if not await require_access(interaction, "unwhitelist", ephemeral=True):
         return
 
     assert bot.pool is not None
