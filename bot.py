@@ -657,6 +657,7 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         await send_role_log(interaction, log_msg)
 
 
+
 @bot.tree.command(name="unrole", description="remove a user's rank (sets them to the lowest assignable group role)")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
