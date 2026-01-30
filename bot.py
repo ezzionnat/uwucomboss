@@ -106,10 +106,24 @@ def parse_role_id_from_path(role_path: str) -> Optional[int]:
 
 
 async def roblox_list_roles(client: httpx.AsyncClient) -> list[dict]:
-    r = await client.get(f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/roles", headers=roblox_headers())
+    r = await client.get(
+        f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/roles",
+        headers=roblox_headers(),
+    )
     r.raise_for_status()
     data = r.json() if r.content else {}
-    return data.get("roles") or []
+
+    # roblox may return roles under different keys
+    if isinstance(data.get("roles"), list):
+        return data["roles"]
+
+    if isinstance(data.get("groupRoles"), list):
+        return data["groupRoles"]
+
+    if isinstance(data.get("data"), list):
+        return data["data"]
+
+    return []
 
 
 async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Optional[dict]:
