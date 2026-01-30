@@ -649,7 +649,7 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
 
     # log message
         # if they already had a real role (not base), log it as a change
-        if base_role is not None and current_role_id is not None and int(current_role_id) != int(base_role) and old_name:
+     if base_role is not None and current_role_id is not None and int(current_role_id) != int(base_role) and old_name:
             log_msg = f"{interaction.user.mention} changed `{target_user_id}` from `{old_name}` to `{new_name}`"
         else:
             log_msg = f"{interaction.user.mention} has roled `{target_user_id}` to `{new_name}`"
