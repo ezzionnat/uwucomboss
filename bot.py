@@ -146,14 +146,14 @@ class credit_bot(commands.Bot):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
         self.pool: Optional[asyncpg.Pool] = None
-        self.http: Optional[httpx.AsyncClient] = None
+        self.rbx_http: Optional[httpx.AsyncClient] = None
 
         # roblox roles cache
         self._rbx_roles: list[dict] = []
         self._rbx_lowest_role_id: Optional[int] = None
 
     async def setup_hook(self):
-        self.http = httpx.AsyncClient(timeout=25)
+        self.rbx_http = httpx.AsyncClient(timeout=25)
 
         self.pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
 
@@ -186,8 +186,9 @@ class credit_bot(commands.Bot):
             print("synced commands globally")
 
     async def close(self):
-        if self.http:
-            await self.http.aclose()
+        if self.rbx_http:
+            await self.rbx_http.aclose()
+
         if self.pool:
             await self.pool.close()
         await super().close()
