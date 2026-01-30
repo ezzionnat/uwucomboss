@@ -141,6 +141,8 @@ async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Opti
     r.raise_for_status()
 
     data = r.json() if r.content else {}
+    print("membership lookup keys:", list(data.keys())[:20])
+    print("membership lookup raw:", str(data)[:500])
     memberships = data.get("memberships") or data.get("data") or []
     if not memberships:
         return None
