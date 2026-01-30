@@ -163,12 +163,14 @@ async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Opti
 
 
 async def roblox_set_role_by_membership_id(client: httpx.AsyncClient, membership_id: str, role_id: int) -> None:
-    body = {"role": f"groups/{ROBLOX_GROUP_ID}/roles/{int(role_id)}"}
+    body = {"role": {"path": f"groups/{ROBLOX_GROUP_ID}/roles/{int(role_id)}"}}
+
     r = await client.patch(
         f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/memberships/{membership_id}",
         headers=roblox_headers(),
         json=body,
     )
+
     if r.status_code >= 400:
         txt = (r.text or "")[:300]
         raise RuntimeError(f"roblox error {r.status_code}: {txt}")
