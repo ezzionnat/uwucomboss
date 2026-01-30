@@ -457,6 +457,42 @@ async def send_role_log(interaction: discord.Interaction, text: str) -> None:
     except Exception:
         return
 
+async def roblox_list_memberships_page(client: httpx.AsyncClient, page_token: str | None = None) -> dict:
+    params: dict[str, str] = {"maxPageSize": "100"}
+    if page_token:
+        params["pageToken"] = page_token
+
+    r = await client.get(
+        f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/memberships",
+        headers=roblox_headers(),
+        params=params,
+    )
+    r.raise_for_status()
+    return r.json() if r.content else {}
+
+
+async def roblox_iter_memberships(client: httpx.AsyncClient):
+    page_token: str | None = None
+    while True:
+        data = await roblox_list_memberships_page(client, page_token)
+        items = data.get("groupMemberships") or data.get("memberships") or []
+        for m in items:
+            yield m
+        page_token = data.get("nextPageToken") or None
+        if not page_token:
+            break
+
+
+def parse_membership_id_from_path(membership_path: str) -> Optional[str]:
+    # examples:
+    # "groups/174571331/memberships/XXXXXXXX"
+    # "groups/174571331/memberships/MjUwNzIyNjE4x0A"
+    if not membership_path:
+        return None
+    s = str(membership_path).strip()
+    last = s.split("/")[-1].strip()
+    return last or None
+
 
 # -------------------------
 # roblox commands
@@ -939,6 +975,89 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
     await interaction.response.send_message(
         f"removed stored roles from <@{int(user.id)}>* ({res.lower()}).",
         ephemeral=True,
+    )
+
+@bot.tree.command(
+    name="group-wipe",
+    description="reset everyone's role in the roblox group to the lowest role (owners only)"
+)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(confirm="type true to confirm")
+async def group_wipe_cmd(interaction: discord.Interaction, confirm: bool):
+    # owners only, hard stop
+    level = await get_access_level(int(interaction.user.id))
+    if level != "owners":
+        await interaction.response.send_message("you do not have permission to use this command.", ephemeral=True)
+        return
+
+    if not confirm:
+        await interaction.response.send_message("set confirm to true to run `/group-wipe`.", ephemeral=True)
+        return
+
+    if not roblox_api_key:
+        await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=True)
+        return
+
+    assert bot.rbx_http is not None
+
+    await interaction.response.defer(ephemeral=False)
+
+    # make sure we know the lowest role
+    try:
+        await ensure_roblox_roles_loaded(force=True)
+    except Exception as e:
+        await interaction.followup.send(f"failed: {e}", ephemeral=False)
+        return
+
+    lowest = bot._rbx_lowest_assignable_role_id
+    if lowest is None:
+        await interaction.followup.send("could not determine lowest role in group.", ephemeral=False)
+        return
+
+    lowest_name, _ = rbx_role_info_by_id(int(lowest))
+
+    changed = 0
+    scanned = 0
+    failed = 0
+
+    try:
+        async for m in roblox_iter_memberships(bot.rbx_http):
+            scanned += 1
+
+            membership_path = str(m.get("path") or m.get("name") or "")
+            membership_id = parse_membership_id_from_path(membership_path)
+            if not membership_id:
+                failed += 1
+                continue
+
+            current_role_path = str(m.get("role") or "")
+            current_role_id = parse_role_id_from_path(current_role_path)
+
+            # skip if already lowest
+            if current_role_id is not None and int(current_role_id) == int(lowest):
+                continue
+
+            try:
+                await roblox_set_role_by_membership_id(bot.rbx_http, membership_id, int(lowest))
+                changed += 1
+            except Exception:
+                failed += 1
+
+    except Exception as e:
+        await interaction.followup.send(f"failed while scanning: {e}", ephemeral=False)
+        return
+
+    # public response
+    await interaction.followup.send(
+        f"group wipe complete. set `{changed}` users to `{lowest_name}`. scanned `{scanned}`. failed `{failed}`.",
+        ephemeral=False,
+    )
+
+    # log
+    await send_role_log(
+        interaction,
+        f"{interaction.user.mention} ran group wipe. set `{changed}` users to `{lowest_name}` (failed `{failed}`)",
     )
 
 
