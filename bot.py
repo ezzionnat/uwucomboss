@@ -111,7 +111,6 @@ async def roblox_list_roles(client: httpx.AsyncClient) -> list[dict]:
 
 
 async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Optional[dict]:
-    # filter lookup so we don’t scan the whole group
     params = {
         "maxPageSize": "10",
         "filter": f"user == 'users/{int(user_id)}'",
@@ -148,7 +147,6 @@ class credit_bot(commands.Bot):
         self.pool: Optional[asyncpg.Pool] = None
         self.rbx_http: Optional[httpx.AsyncClient] = None
 
-        # roblox roles cache
         self._rbx_roles: list[dict] = []
         self._rbx_lowest_role_id: Optional[int] = None
 
@@ -188,7 +186,6 @@ class credit_bot(commands.Bot):
     async def close(self):
         if self.rbx_http:
             await self.rbx_http.aclose()
-
         if self.pool:
             await self.pool.close()
         await super().close()
@@ -371,16 +368,15 @@ async def resolve_target_user(interaction: discord.Interaction, option_name: str
 async def ensure_roblox_roles_loaded(force: bool = False) -> None:
     if not roblox_api_key:
         return
-    if bot.http is None:
+    if bot.rbx_http is None:
         return
 
     if bot._rbx_roles and not force:
         return
 
-    roles = await roblox_list_roles(bot.http)
+    roles = await roblox_list_roles(bot.rbx_http)
     bot._rbx_roles = roles
 
-    # compute lowest rank role id (used for /unrole and for “already ranked” check)
     lowest_id: Optional[int] = None
     lowest_rank: Optional[int] = None
     for r in roles:
@@ -408,7 +404,6 @@ async def ranking_autocomplete(interaction: discord.Interaction, current: str):
     current = (current or "").lower().strip()
     out: list[app_commands.Choice[str]] = []
 
-    # show up to 25 matches
     for r in bot._rbx_roles:
         display = str(r.get("displayName") or "").strip()
         role_path = str(r.get("name") or r.get("path") or "")
@@ -416,11 +411,9 @@ async def ranking_autocomplete(interaction: discord.Interaction, current: str):
         if not display or rid is None:
             continue
 
-        # match substring
         if current and current not in display.lower():
             continue
 
-        # value is role_id as string so command receives it
         out.append(app_commands.Choice(name=f"{display} ({rid})", value=str(rid)))
         if len(out) >= 25:
             break
@@ -603,18 +596,10 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
     )
 
 
-# -------------------------
-# roblox commands you asked for
-# /roles   -> list all roles in the group
-# /role    -> rank a user to a role (autocomplete)
-# /unrole  -> reset user to lowest role
-# -------------------------
-
 @bot.tree.command(name="roles", description="list all roles in the roblox group")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def roles_cmd(interaction: discord.Interaction):
-    # gate using your existing permission system (same as whitelist)
     if not await require_access(interaction, "whitelist"):
         return
 
@@ -622,7 +607,7 @@ async def roles_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=True)
         return
 
-    assert bot.http is not None
+    assert bot.rbx_http is not None
     await interaction.response.defer(ephemeral=True)
 
     try:
@@ -661,22 +646,20 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=True)
         return
 
-    assert bot.http is not None
+    assert bot.rbx_http is not None
     await interaction.response.defer(ephemeral=True)
 
-    # resolve target user id
     raw = (id or "").strip()
     target_user_id: Optional[int] = None
     if raw.isdigit():
         target_user_id = int(raw)
     else:
-        target_user_id = await roblox_username_to_user_id(bot.http, raw)
+        target_user_id = await roblox_username_to_user_id(bot.rbx_http, raw)
 
     if not target_user_id:
         await interaction.followup.send("invalid id. provide a roblox user id or username.", ephemeral=True)
         return
 
-    # ranking comes in as role_id string from autocomplete
     if not is_digits(ranking):
         await interaction.followup.send("invalid ranking selection.", ephemeral=True)
         return
@@ -688,9 +671,8 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
     except Exception:
         pass
 
-    # lookup membership
     try:
-        m = await roblox_get_membership(bot.http, int(target_user_id))
+        m = await roblox_get_membership(bot.rbx_http, int(target_user_id))
     except Exception as e:
         await interaction.followup.send(f"failed: {e}", ephemeral=True)
         return
@@ -708,19 +690,14 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
     current_role_path = str(m.get("role") or "")
     current_role_id = parse_role_id_from_path(current_role_path)
 
-    # lowest role is considered "unranked"
     lowest = bot._rbx_lowest_role_id
 
-    # if they already have a rank (anything not lowest), force /unrole first
     if current_role_id is not None and lowest is not None and current_role_id != lowest:
-        await interaction.followup.send(
-            "user already has a rank in group, use /unrole on them.",
-            ephemeral=True,
-        )
+        await interaction.followup.send("user already has a rank in group, use /unrole on them.", ephemeral=True)
         return
 
     try:
-        await roblox_set_role_by_membership_id(bot.http, membership_id, role_id)
+        await roblox_set_role_by_membership_id(bot.rbx_http, membership_id, role_id)
     except Exception as e:
         await interaction.followup.send(f"failed: {e}", ephemeral=True)
         return
@@ -740,7 +717,7 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
         await interaction.response.send_message("missing roblox_api_key in environment variables.", ephemeral=True)
         return
 
-    assert bot.http is not None
+    assert bot.rbx_http is not None
     await interaction.response.defer(ephemeral=True)
 
     raw = (id or "").strip()
@@ -748,13 +725,12 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
     if raw.isdigit():
         target_user_id = int(raw)
     else:
-        target_user_id = await roblox_username_to_user_id(bot.http, raw)
+        target_user_id = await roblox_username_to_user_id(bot.rbx_http, raw)
 
     if not target_user_id:
         await interaction.followup.send("invalid id. provide a roblox user id or username.", ephemeral=True)
         return
 
-    # ensure roles loaded so we know lowest role
     try:
         await ensure_roblox_roles_loaded(force=True)
     except Exception as e:
@@ -767,7 +743,7 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
         return
 
     try:
-        m = await roblox_get_membership(bot.http, int(target_user_id))
+        m = await roblox_get_membership(bot.rbx_http, int(target_user_id))
     except Exception as e:
         await interaction.followup.send(f"failed: {e}", ephemeral=True)
         return
@@ -783,7 +759,7 @@ async def unrole_cmd(interaction: discord.Interaction, id: str):
         return
 
     try:
-        await roblox_set_role_by_membership_id(bot.http, membership_id, int(lowest))
+        await roblox_set_role_by_membership_id(bot.rbx_http, membership_id, int(lowest))
     except Exception as e:
         await interaction.followup.send(f"failed: {e}", ephemeral=True)
         return
