@@ -25,7 +25,7 @@ ROBLOX_GROUP_ID = "174571331"
 LOG_CHANNEL_ID = 1466623945514942506
 
 embed_color = discord.Color.green()
-valid_roles = {"owners", "manager", "staff"}
+valid_roles = {"owners", "manager", "staff", "tag_manager"}
 
 ROBLOX_BASE = "https://apis.roblox.com/cloud/v2"
 ROBLOX_USERS = "https://users.roblox.com/v1"
@@ -65,6 +65,17 @@ def make_embed(title: str, lines: list[str]) -> discord.Embed:
 
 def is_digits(s: str) -> bool:
     return bool(s) and s.isdigit()
+
+def pretty_level(level: str) -> str:
+    if level == "owners":
+        return "Owner"
+    if level == "tag_manager":
+        return "Tag Manager"
+    if level == "manager":
+        return "Manager"
+    if level == "staff":
+        return "Staff"
+    return "None"
 
 
 async def roblox_username_to_user_id(client: httpx.AsyncClient, username: str) -> Optional[int]:
@@ -292,6 +303,8 @@ async def get_user_roles(user_id: int) -> set[str]:
 def resolve_level_from_roles(roles: set[str]) -> str:
     if "owners" in roles:
         return "owners"
+    if "tag_manager" in roles:
+        return "tag_manager"
     if "manager" in roles:
         return "manager"
     if "staff" in roles:
@@ -311,7 +324,7 @@ def can_use_command(level: str, command: str) -> bool:
         return True
 
     if command in {"role", "unrole", "roles", "rolecheck"}:
-        return level in {"owners", "manager"}
+        return level in {"owners", "tag_manager"}
 
     if level == "owners":
         return True
@@ -342,6 +355,7 @@ def role_choices() -> list[app_commands.Choice[str]]:
         app_commands.Choice(name="owners", value="owners"),
         app_commands.Choice(name="manager", value="manager"),
         app_commands.Choice(name="staff", value="staff"),
+        app_commands.Choice(name="tag_manager", value="tag_manager"),
     ]
 
 
@@ -976,6 +990,62 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
         f"removed stored roles from <@{int(user.id)}>* ({res.lower()}).",
         ephemeral=True,
     )
+
+@bot.tree.command(name="rankinglist", description="list everyone whitelisted in the bot")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def rankinglist_cmd(interaction: discord.Interaction):
+    # i’m making this owners only (same power level as whitelist/unwhitelist)
+    if not await require_access(interaction, "whitelist"):
+        return
+
+    assert bot.pool is not None
+
+    await interaction.response.defer(ephemeral=False)
+
+    async with bot.pool.acquire() as con:
+        rows = await con.fetch(
+            """
+            select user_id, role
+            from whitelist_roles
+            order by user_id asc, role asc;
+            """
+        )
+
+    if not rows:
+        await interaction.followup.send("no one is whitelisted.", ephemeral=False)
+        return
+
+    by_user: dict[int, set[str]] = {}
+    for r in rows:
+        uid = int(r["user_id"])
+        role = str(r["role"]).lower().strip()
+        by_user.setdefault(uid, set()).add(role)
+
+    # build lines
+    lines: list[str] = []
+    for uid, roles in sorted(by_user.items(), key=lambda x: x[0]):
+        level = resolve_level_from_roles(roles)
+        lines.append(f"• <@{uid}> | {uid} | {pretty_level(level)}")
+
+    # discord embed description limit is ~4096 chars, so chunk it
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    cur_len = 0
+    for line in lines:
+        if cur_len + len(line) + 1 > 3800 and cur:
+            chunks.append(cur)
+            cur = []
+            cur_len = 0
+        cur.append(line)
+        cur_len += len(line) + 1
+    if cur:
+        chunks.append(cur)
+
+    for i, chunk in enumerate(chunks, start=1):
+        title = "Whitelists to the bot" if len(chunks) == 1 else f"Whitelists to the bot ({i}/{len(chunks)})"
+        e = make_embed(title, chunk)
+        await interaction.followup.send(embed=e, ephemeral=False)
 
 @bot.tree.command(
     name="group-wipe",
