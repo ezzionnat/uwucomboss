@@ -129,7 +129,6 @@ async def roblox_list_roles(client: httpx.AsyncClient) -> list[dict]:
 async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Optional[dict]:
     params = {
         "maxPageSize": "10",
-        # important: no spaces, double equals, and single quotes exactly like this
         "filter": f"user=='users/{int(user_id)}'",
     }
 
@@ -141,11 +140,17 @@ async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Opti
     r.raise_for_status()
 
     data = r.json() if r.content else {}
-    print("membership lookup keys:", list(data.keys())[:20])
-    print("membership lookup raw:", str(data)[:500])
-    memberships = data.get("memberships") or data.get("data") or []
+
+    # your api returns this shape
+    memberships = data.get("groupMemberships") or []
+
+    # fallbacks, just in case roblox changes again
+    if not memberships:
+        memberships = data.get("memberships") or data.get("data") or []
+
     if not memberships:
         return None
+
     return memberships[0]
 
 
@@ -703,8 +708,8 @@ async def role_cmd(interaction: discord.Interaction, id: str, ranking: str):
         await interaction.followup.send("user is not in the group.", ephemeral=True)
         return
 
-    membership_name = str(m.get("name") or "")
-    membership_id = membership_name.split("/")[-1] if membership_name else ""
+    membership_path = str(m.get("path") or m.get("name") or "")
+    membership_id = membership_path.split("/")[-1] if membership_path else ""
     if not membership_id:
         await interaction.followup.send("could not read membership id.", ephemeral=True)
         return
