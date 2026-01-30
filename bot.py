@@ -129,19 +129,23 @@ async def roblox_list_roles(client: httpx.AsyncClient) -> list[dict]:
 async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Optional[dict]:
     params = {
         "maxPageSize": "10",
-        "filter": f"user == 'users/{int(user_id)}'",
+        # important: no spaces, double equals, and single quotes exactly like this
+        "filter": f"user=='users/{int(user_id)}'",
     }
+
     r = await client.get(
         f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/memberships",
         headers=roblox_headers(),
         params=params,
     )
     r.raise_for_status()
+
     data = r.json() if r.content else {}
-    memberships = data.get("memberships") or []
+    memberships = data.get("memberships") or data.get("data") or []
     if not memberships:
         return None
     return memberships[0]
+
 
 
 async def roblox_set_role_by_membership_id(client: httpx.AsyncClient, membership_id: str, role_id: int) -> None:
