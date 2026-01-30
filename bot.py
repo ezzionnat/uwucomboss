@@ -448,18 +448,11 @@ async def ranking_autocomplete(interaction: discord.Interaction, current: str):
 
 
 async def send_role_log(interaction: discord.Interaction, text: str) -> None:
-    # only log if this was used in a guild
-    if interaction.guild is None:
-        return
-
-    ch = interaction.guild.get_channel(LOG_CHANNEL_ID)
-    if ch is None:
-        try:
-            ch = await interaction.client.fetch_channel(LOG_CHANNEL_ID)
-        except Exception:
-            return
-
+    # logs even if the command was used in dms or outside a guild
     try:
+        ch = interaction.client.get_channel(LOG_CHANNEL_ID)
+        if ch is None:
+            ch = await interaction.client.fetch_channel(LOG_CHANNEL_ID)
         await ch.send(text)
     except Exception:
         return
