@@ -1015,8 +1015,8 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, ro
         )
 
     await interaction.response.send_message(
-        f"added stored role `{role_value}` to <@{int(user.id)}>*.",
-        ephemeral=True,
+        f"granted `{role_value}` to {user.mention} meow",
+        ephemeral=False,
     )
 
 
