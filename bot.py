@@ -150,6 +150,52 @@ async def roblox_get_membership(client: httpx.AsyncClient, user_id: int) -> Opti
         return None
     return memberships[0]
 
+async def roblox_avatar_url(client: httpx.AsyncClient, user_id: int) -> str:
+    try:
+        r = await client.get(
+            "https://thumbnails.roblox.com/v1/users/avatar-headshot",
+            params={
+                "userIds": str(user_id),
+                "size": "150x150",
+                "format": "Png",
+                "isCircular": "true",
+            },
+            timeout=10,
+        )
+        data = r.json()
+        return data["data"][0]["imageUrl"]
+    except Exception:
+        return ""
+
+async def roblox_members_in_role(client: httpx.AsyncClient, role_id: int) -> list[dict]:
+    members: list[dict] = []
+    page_token: str | None = None
+
+    while True:
+        params = {"maxPageSize": 100}
+        if page_token:
+            params["pageToken"] = page_token
+
+        r = await client.get(
+            f"{ROBLOX_BASE}/groups/{ROBLOX_GROUP_ID}/memberships",
+            headers=roblox_headers(),
+            params=params,
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        for m in data.get("groupMemberships", []):
+            role_path = str(m.get("role") or "")
+            rid = parse_role_id_from_path(role_path)
+            if rid == role_id:
+                members.append(m)
+
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    return members
+
 
 async def roblox_set_role_by_membership_id(client: httpx.AsyncClient, membership_id: str, role_id: int) -> None:
     body = {"role": f"groups/{ROBLOX_GROUP_ID}/roles/{int(role_id)}"}
@@ -990,6 +1036,68 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
         f"removed stored roles from <@{int(user.id)}>* ({res.lower()}).",
         ephemeral=True,
     )
+
+@bot.tree.command(name="inrole", description="list members in a roblox group role")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(role="pick a role (autocomplete)")
+@app_commands.autocomplete(role=ranking_autocomplete)
+async def inrole_cmd(interaction: discord.Interaction, role: str):
+    if not await require_access(interaction, "whitelist"):
+        return
+
+    if not roblox_api_key:
+        await interaction.response.send_message("missing roblox api key.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    role_id = int(role)
+    role_name, _ = rbx_role_info_by_id(role_id)
+
+    members = await roblox_members_in_role(bot.rbx_http, role_id)
+
+    if not members:
+        await interaction.followup.send(
+            f"no members found in **{role_name}**.",
+            ephemeral=False,
+        )
+        return
+
+    embeds: list[discord.Embed] = []
+    chunk: list[str] = []
+
+    for m in members:
+        user_path = str(m.get("user") or "")
+        user_id = int(user_path.split("/")[-1])
+        update_time = str(m.get("updateTime") or "").split("T")[0]
+
+        avatar = await roblox_avatar_url(bot.rbx_http, user_id)
+
+        line = f"**{user_id}**\nroled: `{update_time}`"
+        chunk.append(line)
+
+        if len(chunk) == 5:
+            e = discord.Embed(
+                title=f"Members of {role_name}",
+                description="\n\n".join(chunk),
+                color=embed_color,
+            )
+            if avatar:
+                e.set_thumbnail(url=avatar)
+            embeds.append(e)
+            chunk = []
+
+    if chunk:
+        e = discord.Embed(
+            title=f"Members of {role_name}",
+            description="\n\n".join(chunk),
+            color=embed_color,
+        )
+        embeds.append(e)
+
+    for e in embeds:
+        await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="rankinglist", description="list everyone whitelisted in the bot")
 @app_commands.allowed_installs(guilds=True, users=True)
