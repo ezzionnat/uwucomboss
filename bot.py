@@ -1052,52 +1052,84 @@ async def inrole_cmd(interaction: discord.Interaction, role: str):
 
     await interaction.response.defer(ephemeral=False)
 
-    role_id = int(role)
-    role_name, _ = rbx_role_info_by_id(role_id)
-
-    members = await roblox_members_in_role(bot.rbx_http, role_id)
-
-    if not members:
-        await interaction.followup.send(
-            f"no members found in **{role_name}**.",
-            ephemeral=False,
-        )
+    if not role.isdigit():
+        await interaction.followup.send("invalid role.", ephemeral=False)
         return
 
-    embeds: list[discord.Embed] = []
-    chunk: list[str] = []
+    role_id = int(role)
+
+    try:
+        await ensure_roblox_roles_loaded()
+    except Exception:
+        pass
+
+    # role name
+    role_name = "unknown role"
+    for r in bot._rbx_roles:
+        rp = str(r.get("path") or r.get("name") or "")
+        rid = parse_role_id_from_path(rp)
+        if rid == role_id:
+            role_name = str(r.get("displayName") or r.get("name") or role_name).strip()
+            break
+
+    try:
+        members = await roblox_members_in_role(bot.rbx_http, role_id)
+    except Exception as e:
+        await interaction.followup.send(f"failed: {e}", ephemeral=False)
+        return
+
+    if not members:
+        await interaction.followup.send(f"no members found in **{role_name}**.", ephemeral=False)
+        return
+
+    lines: list[str] = []
 
     for m in members:
         user_path = str(m.get("user") or "")
-        user_id = int(user_path.split("/")[-1])
-        update_time = str(m.get("updateTime") or "").split("T")[0]
+        if not user_path:
+            continue
 
-        avatar = await roblox_avatar_url(bot.rbx_http, user_id)
+        try:
+            user_id = int(user_path.split("/")[-1])
+        except Exception:
+            continue
 
-        line = f"**{user_id}**\nroled: `{update_time}`"
-        chunk.append(line)
+        # fix date
+        raw_time = str(m.get("updateTime") or "")
+        date = "unknown"
+        if raw_time and not raw_time.startswith("0001-01-01"):
+            date = raw_time.split("T")[0]
 
-        if len(chunk) == 5:
-            e = discord.Embed(
-                title=f"Members of {role_name}",
-                description="\n\n".join(chunk),
-                color=embed_color,
-            )
-            if avatar:
-                e.set_thumbnail(url=avatar)
-            embeds.append(e)
-            chunk = []
+        # avatar url + profile url
+        avatar_url = await roblox_avatar_url(bot.rbx_http, user_id)
+        profile_url = f"https://www.roblox.com/users/{user_id}/profile"
 
-    if chunk:
-        e = discord.Embed(
-            title=f"Members of {role_name}",
-            description="\n\n".join(chunk),
-            color=embed_color,
-        )
-        embeds.append(e)
+        icon = "icon"
+        if avatar_url:
+            icon = f"[icon]({avatar_url})"
 
-    for e in embeds:
-        await interaction.followup.send(embed=e)
+        lines.append(f"{icon} [{user_id}]({profile_url}) - roled: `{date}`")
+
+    # chunk to avoid embed limit
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    cur_len = 0
+
+    for line in lines:
+        if cur_len + len(line) + 1 > 3500 and cur:
+            chunks.append(cur)
+            cur = []
+            cur_len = 0
+        cur.append(line)
+        cur_len += len(line) + 1
+
+    if cur:
+        chunks.append(cur)
+
+    for i, chunk in enumerate(chunks, start=1):
+        title = f"Members of {role_name}" if len(chunks) == 1 else f"Members of {role_name} ({i}/{len(chunks)})"
+        e = make_embed(title, chunk)
+        await interaction.followup.send(embed=e, ephemeral=False)
 
 @bot.tree.command(name="rankinglist", description="list everyone whitelisted in the bot")
 @app_commands.allowed_installs(guilds=True, users=True)
